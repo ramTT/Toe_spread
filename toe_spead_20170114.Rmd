@@ -1,0 +1,291 @@
+---
+title: "Functional Outcome Following Sciatic Injury in Mice"
+output: html_document
+---
+# External and Internal Toe Spread
+##### **Author:** Pendar Khalili  
+##### **Data analysis:** Beast-Technology.com
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#install.packages("data.table")
+#install.packages("tidyverse")
+#install.packages("cowplot")
+# install.packages("knitr")
+
+library(data.table)
+library(tidyverse)
+library(cowplot)
+library(knitr)
+```
+
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#1. IMPORTING DATA AND DEFINING VARIABLES
+rm(list=ls())
+DT <- fread("toe_spread.csv")
+
+factor_vars <- c("treatment", "measurement.type", "day")
+DT[, factor_vars] <- DT[, lapply(.SD, factor), .SDcols=factor_vars]
+DT[, "measurement.type"] <- factor(DT[,measurement.type], labels = c("External", "Internal"))
+
+#2. ADDING RATIO CALCULATION AND TRANSFORMING INTO LONG FORMAT
+DT <- DT[, toe.spread.ratio := toe.spread.right/toe.spread.left]
+DT_long <- melt.data.table(DT, id.vars=c("PK.Index", "treatment", "measurement.type", "day"), 
+                           measure.vars = c("image number", "toe.spread.right", "toe.spread.left","toe.spread.ratio"),
+                           variable.name = "Variable", value.name = "Value")
+#3. Reducing DT_long to only involve 
+DT_long_reduced <- DT_long[day!="-7" & day!="-6" & day!="-5"]
+DT_long_reduced[, "day"] <- factor(DT_long_reduced[,day], levels=c("-3","-1","1","3","5","7","9","11","13","20"))
+```
+
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#4. TESTING ASSUMPTIONS (NORMALITY AND HOMOGENITY OF VARIANCES)
+
+#4.1 Assumption 1: Normality of data within each treatment type and day using Shapiro-Wilks test
+normality_assumption_function <- function(calcnormdata, measure.type, variable.type){
+  setkey(calcnormdata, measurement.type,Variable)
+  
+  out <-   calcnormdata[.(measure.type,variable.type)][,.(Normality.Test.P.value=shapiro.test(Value)$p.value), by=c("treatment", "day")][,.(Average.P.Value=mean(Normality.Test.P.value), Median.P.Value=median(Normality.Test.P.value), CI.P.Value=qnorm(0.975)*sd(Normality.Test.P.value)/sqrt(.N))]
+  
+  return(out)
+}
+
+#4.2 Assumption 2: Homogenity of Variances within each treatment type and day using Levene's test
+homogenity_of_variance_function <- function(calchomodata, measure.type, variable.type){
+  setkey(calchomodata, measurement.type,Variable)
+
+  usedata <- calchomodata[.(measure.type, variable.type)]
+  uselist <- split(usedata,by="day")
+  raw_p <- lapply(uselist, function(x){fligner.test(x[,Value],x[,treatment])$p.value})
+  raw_p <- data.table(do.call(rbind, raw_p))  
+  
+  out <- raw_p[,.(Average.P.Value=mean(V1), Median.P.Value=median(V1), CI.P.Value=qnorm(0.975)*sd(V1)/(sqrt(.N)))] 
+  
+  return(out)
+}
+```
+
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#5. Kruskal Wallis Test for Main effects
+
+#5.1 Evaluating difference within treatment groups over time 
+one_way_test_horizontal <- function(calc.dataset, measure.type, variable.type, splitvar){
+  setkey(calc.dataset,measurement.type, Variable)
+  usedata <- calc.dataset[.(measure.type, variable.type)]
+  uselist <- split(usedata,by=splitvar)
+  out <- sapply(uselist, function(x){kruskal.test(x[,Value], x[,day],x)$p.value})
+  out <- data.table(t(out))
+  names(out) <- c("Kolchicin & Crush", "Crush", "NaCl")
+
+  return(out)
+}
+
+#5.2 Evaluating difference between treatment groups within days
+one_way_test_vertical <- function(calc.dataset, measure.type, variable.type, splitvar){
+  setkey(calc.dataset,measurement.type, Variable)
+  usedata <- calc.dataset[.(measure.type, variable.type)]
+  uselist <- split(usedata,by=splitvar)
+  out <- sapply(uselist, function(x){kruskal.test(x[,Value], x[,treatment],x)$p.value})
+  out <- data.table(t(out))
+
+  return(out)
+}
+```
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#6. Post hoc test using Pair-wise Mann-Whitney U-tests
+p.adjustment.methods <- list("holm", "hochberg", "hommel","bonferroni", "BH", "BY","fdr", "none")
+
+#6.1 Between treatment groups within each day - > paired=FALSE
+posthoc_p_value__generic_function <- function(listobject, adjust.method){
+  out <- pairwise.wilcox.test(listobject[,Value], listobject[,treatment], p.adjust.method = adjust.method)$p.value  
+  out <- data.table(melt(out, measure.vars=c("crush", "kolch&crush")))[,`:=`(Var1=NULL,Var2=NULL)][!is.na(value)]
+  out <- data.table(t(out))
+  return(out)
+}
+
+posthoc_p_value__average_function <- function(listobject2){
+  p_average <- lapply(p.adjustment.methods, function(x){posthoc_p_value__generic_function(listobject2, x)})
+  p_average <- do.call(rbind, p_average)
+  p_average <- apply(p_average,2,mean)
+  return(p_average)
+}
+
+posthoc_vertical_function <- function(compare.data){
+  uselist <- split(compare.data, by="day")
+  p_values <- lapply(uselist, function(x){posthoc_p_value__average_function(x)})
+  p_values <- do.call(rbind, p_values)
+  p_values <- data.table(c("-3", "-1", "1", "3", "5", "7", "9", "11", "13", "20"),signif(p_values,3))
+  names(p_values ) <- c("Day","Kolch&Crush vs Crush", "Crush vs NaCl", "Kolch&Crush vs NaCl")
+  return(p_values)
+}
+
+#6.2 Withing treatment groups over time -> paired=TRUE 
+```
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#7. PLOTTING FUNCTION
+toe_spread_plot <- function(plotdata,measure.select,variable.select, plottype){
+  #selecting data
+  setkey(plotdata, measurement.type, Variable)
+  usedata <- plotdata[.(measure.select, variable.select)]
+  
+  #calculating necessary parameters for plotting
+  usedata_summary <- usedata[,.(Count=.N, Average=mean(Value),CI=qnorm(0.975)*sd(Value)/sqrt(.N)), by=c("day", "treatment")]
+  
+  #selecting correct plotting data
+  if(plottype==1){plotdata2=usedata_summary; yvar=usedata_summary[,Average]} else if(plottype==2){plotdata2=usedata; yvar=usedata[,Value]}
+  
+  #plotting  
+  out <- ggplot(plotdata2, aes(day,yvar,colour=treatment))+
+    geom_rect(aes(xmin=6, xmax=10, ymin=0, ymax=2), fill="white", linetype=2, size=0.8, color="black")+
+    
+    # geom_jitter(aes(colour=treatment),alpha=0.6, size=2.5)+
+    # geom_boxplot(aes(fill=treatment, colour=treatment), alpha=0.4, position = position_dodge(width=0.8))+
+
+    # geom_errorbar(aes(ymin=Average-CI, ymax=Average+CI), width=0.3,size=1,position = position_dodge(width=0.5))+
+    # geom_line(aes(group=treatment),position = position_dodge(width=0.5), size=1.3, alpha=0.6)+
+    # geom_point(size=3, position = position_dodge(width=0.5),alpha=0.6, shape=18)+
+
+    geom_errorbar(aes(ymin=Average-CI, ymax=Average+CI), width=0.1,size=1)+
+    geom_line(aes(group=treatment), size=1.3, alpha=0.6)+
+    geom_point(size=3, alpha=0.6, shape=18)+
+
+    ylab("Toe Spread Index (Right/Left)")+
+    xlab("Day")+
+    scale_y_continuous(breaks=seq(0,2,0.25), limits=c(0,2))+
+    scale_x_discrete()+
+    scale_color_manual(values=c("red","blue","darkgreen"), labels=c("Crush","Kolchicin & Crush", "NaCl"), name="Treatment:")+
+    scale_fill_manual(values=c("red","blue","darkgreen"), labels=c("Crush","Kolchicin & Crush", "NaCl"), name="Treatment:")+
+    theme(legend.position = "bottom", legend.text = element_text(size=18), legend.title = element_text(size=18), axis.title=element_text(face="bold", size=18), axis.text = element_text(size=14), plot.title = element_text(size=38))+
+    #annotate("text", x=7, y=2.4, label=paste(measure.select, "Toe Spread Index"), size=11.5, alpha=0.9)+
+    ggtitle(paste(measure.select, "Toe Spread Index"))+
+    annotate("text", x=8, y=1.9, label="Regenerative Interval", size=7, alpha=1, fontface=2)+
+    annotate("text", x=12, y=1.9, label="Recovery Plateau", size=7, alpha=0.7, fontface=2)+
+    annotate("text", x=3, y=1.9, label="Pre-Injury Phase", size=7, alpha=0.7, fontface=2)+
+    annotate("text", x=12, y=0.25, label="Error bars: 95 % CI", fontface=4, alpha=0.9, size=4)+
+    annotate("text", x=1, y=1.5, label="Kolchicin\nTreatment\nImmediately\nafter\nMeasurement", fontface=4, alpha=0.9, size=3.5)+
+    annotate("text", x=5.5, y=1.5, label="Crush\nInjury\nat day 0", fontface=4, alpha=0.9, size=3.5)+
+    geom_segment(aes(x=1,y=1.25, xend=1, yend=1.1), arrow=arrow(length=unit(0.2, "cm")), color="black", size=1)+
+    geom_segment(aes(x=5.5,y=1.25, xend=5.5, yend=1.1), arrow=arrow(length=unit(0.2, "cm")), color="black", size=1)
+
+  
+  return(out)
+}
+
+```
+
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+################################################################# OUTPUT:EXTERNAL
+```
+
+##**Figure 1.** 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE, fig.width=14, fig.height=7}
+toe_spread_plot(DT_long,"External","toe.spread.ratio",1)
+```
+
+**Figure 1. External Toe Spread Index.** Figure reports the toe spread index over time. Three study groups (treatments) were implemented: Crush, Kolchicin & Crush and NaCl. Kolchicin & Crush group received application of Kolchicin onto the sciatic nerve 7 days prior to crush injury (i.e. day -7). Toe spread index was measured for these mice from this day forward. Crush and NaCl groups were measured three and one day prior to crush injury day respectively. Each mouse in Kolchicin & Crush group received a crush injury to the sciatic nerve at day zero. NaCl group did not receive any injury, only application of NaCl onto the sciatic nerve. Toe spread index was measured for each mouse 20 days post day zero. The Pre-Injury phase is defined as the time prior to crush injury. The recovery phase and the recovery plateau are defined post experiment based on dynamic of data. Data is reported as average toe spread index per group and day with 95 % confidence intervals.     
+
+***
+
+###**Table 1.** Assumption 1 (External) 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(normality_assumption_function(DT_long, "External", "toe.spread.ratio"), scientific=TRUE, digits=3), caption="Result of Shapiro-Wilks Test for Normality of Data for each Treatment Group and Day", align="c")
+```
+
+***
+
+###**Table 2.** Assumption 2 (External)
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(homogenity_of_variance_function(DT_long_reduced, "External", "toe.spread.ratio"), scientific=TRUE, digits=3), caption="Result of Fligner-Killeen Test for Homogenity of Variances between each Treatment Group for each Day", align="c")
+```
+
+***
+
+###**Table 3.** Kruskal-Wallis 1 (External)
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(one_way_test_horizontal(DT_long, "External", "toe.spread.ratio", "treatment"), scientific=TRUE, digits=3), align="c", caption = "P-values for Kruskal-Wallis Test Evaluating Difference Within Treatment Groups Over Time")
+```
+
+***
+
+###**Table 4.** Kruskal-Wallis 2 (External)
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(one_way_test_vertical(DT_long_reduced, "External", "toe.spread.ratio", "day"), scientific=TRUE, digits=3), align="c", caption="P-Values for Kruskal-Wallis Test for Evaluation of Difference Between Treatment Groups Within Each Day (-3 and forward)") 
+```
+
+###**Table 5.** Post-Hoc Test 1 (External)
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(posthoc_vertical_function(DT_long_reduced[measurement.type=="External" & Variable=="toe.spread.ratio"]), scientific=TRUE, digits=3), align="c", caption="Average P-values For Pairwise Mann-Whitney U-test (Post Hoc Test) following Kruskal Wallis Test")
+```
+
+Inflation in P-value is adjusted using: "holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr" and "none". Average p-values for each comparison is the calculated and reported in the table above.   
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+######################################################################## OUTPUT:INTERNAL
+```
+
+***
+
+##**Figure 2.** 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE, fig.width=14, fig.height=7}
+toe_spread_plot(DT_long,"Internal","toe.spread.ratio",1)
+```
+
+**Figure 2. Internal Toe Spread Index.** Figure reports the toe spread index over time. Three study groups (treatments) were implemented: Crush, Kolchicin & Crush and NaCl. Kolchicin & Crush group received application of Kolchicin onto the sciatic nerve 7 days prior to crush injury (i.e. day -7). Toe spread index was measured for these mice from this day forward. Crush and NaCl groups were measured three and one day prior to crush injury day respectively. Each mouse in Kolchicin & Crush group received a crush injury to the sciatic nerve at day zero. NaCl group did not receive any injury, only application of NaCl onto the sciatic nerve. Toe spread index was measured for each mouse 20 days post day zero. The Pre-Injury phase is defined as the time prior to crush injury. The recovery phase and the recovery plateau are defined post experiment based on dynamic of data. Data is reported as average toe spread index per group and day with 95 % confidence intervals.  
+
+***
+
+###**Table 1.** Assumption 1 (Internal) 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(normality_assumption_function(DT_long, "Internal", "toe.spread.ratio"), scientific=TRUE, digits=3), caption="Result of Shapiro-Wilks Test for Normality of Data for each Treatment Group and Day", align="c")
+```
+
+***
+
+###**Table 2.** Assumption 2 (Internal) 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(homogenity_of_variance_function(DT_long_reduced, "Internal", "toe.spread.ratio"), scientific=TRUE, digits=3), caption="Result of Fligner-Killeen Test for Homogenity of Variances between each Treatment Group for each Day", align="c")
+```
+
+***
+
+###**Table 3.** Kruskal-Wallis 1 (Internal) 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(one_way_test_horizontal(DT_long, "Internal", "toe.spread.ratio","treatment"), scientific=TRUE, digits=3), align="c", caption="P-values for Kruskal-Wallis Test Evaluating Difference Within Treatment Groups Over Time")
+```
+
+***
+
+###**Table 4.** Kruskal-Wallis 2 (Internal) 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(one_way_test_vertical(DT_long_reduced, "Internal", "toe.spread.ratio", "day"), scientific=TRUE, digits=3), align="c", caption="P-Values for Kruskal-Wallis Test for Evaluation of Difference Between Treatment Groups Within Each Day (-3 and forward)")
+```
+
+###**Table 5.** Post Hoc Test 1 (Internal) 
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+kable(format(posthoc_vertical_function(DT_long_reduced[measurement.type=="Internal" & Variable=="toe.spread.ratio"]), scientific=TRUE, digits=3), align="c", caption="Average P-values For Pairwise Mann-Whitney U-test (Post Hoc Test) following Kruskal Wallis Test")
+```
+
+Inflation in P-value is adjusted using: "holm", "hochberg", "hommel", "bonferroni", "BH", "BY", "fdr" and "none". Average p-values for each comparison is the calculated and reported in the table above.   
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+#BONUS
+#1. bygg ihop kruskal-wallis funktionerna till 1, pinsamt med 2 
+#2. ordna så att plotfunktionen inte behöver juseras manuellt beroede på inputdata. hur göra?
+#3. behövs post hoc test horisontell (över tiden inom grupperna)? Hur göra detta på ett effektivt sätt som tar vara på funktionerna för vertikala jämförelser
+#4. jämför internal och external toes spread ratio -> korrelationanalys
+```
+
+```{r error=FALSE, warning=FALSE, message=FALSE, echo=FALSE}
+# ggsave("Figure1.ToeSpreadRatio_External_type1.jpg",toe_spread_plot(DT_long,"External","toe.spread.ratio",1), width=14, height=7, dpi=1000)
+# ggsave("Figure2.ToeSpreadRatio_Internal_type1.jpg",toe_spread_plot(DT_long,"Internal","toe.spread.ratio",1), width=14, height=7, dpi=1000)
+# ggsave("Figure3.ToeSpreadRatio_External_type2.jpg",toe_spread_plot(DT_long,"External","toe.spread.ratio",2), width=14, height=7, dpi=1000)
+# ggsave("Figure4.ToeSpreadRatio_Internal_type2.jpg",toe_spread_plot(DT_long,"Internal","toe.spread.ratio",2), width=14, height=7, dpi=1000)
+```
